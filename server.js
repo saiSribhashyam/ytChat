@@ -6,39 +6,98 @@ import dotenv from "dotenv";
 import cors from "cors";
 import { v4 as uuidv4 } from 'uuid';
 import rateLimit from "express-rate-limit";
+import helmet from "helmet";
 
 dotenv.config();
 
 const app = express();
 
-app.use(express.json());
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url} - Origin: ${req.headers.origin}`);
+  next();
+});
+
+// Security middleware with adjusted helmet configuration
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  crossOriginOpenerPolicy: { policy: "unsafe-none" }
+}));
+
+// Basic middleware
+app.use(express.json({ limit: '10mb' }));
+
+// CORS configuration
+const allowedOrigins = ['https://ytchatfr.vercel.app', 'http://localhost:3000', 'http://127.0.0.1:5500'];
 
 app.use(cors({
-  origin:[ "http://127.0.0.1:5500","http://localhost:3000",],
-  credentials: true
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log(`Blocked request from origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Pre-flight requests handling
+app.options('*', cors());
 
 // In-memory storage for chat sessions
 const chatSessions = new Map();
 
-// Rate Limiting Middleware
+// Cleanup inactive sessions every hour
+setInterval(() => {
+  const now = Date.now();
+  for (const [chatId, session] of chatSessions.entries()) {
+    if (now - session.lastActive > 3600000) { // 1 hour
+      chatSessions.delete(chatId);
+      console.log(`Cleaned up inactive session: ${chatId}`);
+    }
+  }
+}, 3600000);
+
+// Rate limiting configuration
 const apiLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
-  message: { message: "Too many requests from this IP, please try again after 15 minutes." },
-  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: process.env.NODE_ENV === 'production' ? 100 : 1000,
+  message: { message: "Too many requests, please try again later." },
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
-// Apply the rate limiting middleware to all requests
 app.use(apiLimiter);
 
-// Health Check Endpoint
-app.get("/", (req, res) => {
-  res.status(200).json({ message: "Server is working" });
+// Debug endpoint
+app.get("/debug", (req, res) => {
+  res.json({
+    environment: process.env.NODE_ENV,
+    allowedOrigins,
+    currentOrigin: req.headers.origin,
+    timestamp: new Date().toISOString(),
+    activeSessions: chatSessions.size
+  });
 });
 
-// Start chat and retrieve video information
+// Health Check endpoint
+app.get("/health", (req, res) => {
+  res.status(200).json({ 
+    status: "healthy",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    activeSessions: chatSessions.size,
+    environment: process.env.NODE_ENV
+  });
+});
+
+// Start chat endpoint
 app.post("/startchat", async (req, res) => {
   try {
     const { urlAddress } = req.body;
@@ -47,12 +106,12 @@ app.post("/startchat", async (req, res) => {
       return res.status(400).json({ message: "urlAddress is required." });
     }
 
-    console.log(`Initializing chat with urlAddress: ${urlAddress}`);
+    console.log(`Starting chat for URL: ${urlAddress}`);
 
     const vifo = await getYtinfo(urlAddress);
-    const vidinfo = vifo[0];
-    const author=vifo[1];
-    if (!vidinfo || !vidinfo.id) {
+    const [vidinfo, author] = vifo;
+
+    if (!vidinfo?.id) {
       return res.status(400).json({ message: "Invalid YouTube URL or unable to fetch video info." });
     }
 
@@ -61,45 +120,44 @@ app.post("/startchat", async (req, res) => {
       return res.status(400).json({ message: "Unable to fetch transcript for the video." });
     }
 
-    // Generate a unique chat ID
     const chatId = uuidv4();
-
-    // Initialize chat session with message count
     chatSessions.set(chatId, {
       vidinfo,
       transcript,
       author,
-      history: [], // To store chat history
-      messageCount: 0, // Initialize message count
-      maxMessages: 15 // Set a maximum number of messages per session
+      history: [],
+      messageCount: 0,
+      maxMessages: parseInt(process.env.MAX_MESSAGES || '15'),
+      lastActive: Date.now(),
+      createdAt: new Date().toISOString()
     });
 
-    console.log(`Chat session started with ID: ${chatId}`);
-    console.log("Video info retrieved: ", vidinfo);
+    console.log(`Chat session created: ${chatId}`);
 
     res.status(200).json({ 
       message: "Chat session initialized.",
-      chatId, // Return the chat ID to the client
+      chatId,
       info: vidinfo,
       trans: transcript 
     });
   } catch (err) {
     console.error("StartChat Error:", err);
-    res.status(500).json({ error: "Something went wrong while initializing the chat session." });
+    res.status(500).json({ 
+      error: process.env.NODE_ENV === 'production' 
+        ? "Unable to start chat session" 
+        : err.message,
+      requestId: uuidv4()
+    });
   }
 });
 
-// Chat route to handle messages
+// Chat route endpoint
 app.post("/chatroute", async (req, res) => {
   try {
     const { chatId, message } = req.body;
 
-    if (!chatId) {
-      return res.status(400).json({ message: "chatId is required." });
-    }
-
-    if (!message) {
-      return res.status(400).json({ message: "Message is required." });
+    if (!chatId || !message) {
+      return res.status(400).json({ message: "chatId and message are required." });
     }
 
     const session = chatSessions.get(chatId);
@@ -107,29 +165,39 @@ app.post("/chatroute", async (req, res) => {
       return res.status(400).json({ message: "Invalid chatId or session has ended." });
     }
 
-    // Check if the session has reached the maximum number of messages
     if (session.messageCount >= session.maxMessages) {
       return res.status(429).json({ message: "Message limit reached for this chat session." });
     }
 
-    console.log(`Message from user [Chat ID: ${chatId}]: ${message}`);
-
-    // Pass the message as a string instead of an object
+    console.log(`Processing message for chat: ${chatId}`);
     const responseMessage = await askQuestion(session, message);
-
-    // Update session history and message count
-    session.history.push({ sender: "user", message });
-    session.history.push({ sender: "AI", message: responseMessage });
-    session.messageCount += 2; // Increment by 2 for user and AI messages
+    
+    session.history.push({ 
+      sender: "user", 
+      message, 
+      timestamp: new Date().toISOString() 
+    });
+    session.history.push({ 
+      sender: "AI", 
+      message: responseMessage, 
+      timestamp: new Date().toISOString() 
+    });
+    session.messageCount += 2;
+    session.lastActive = Date.now();
 
     res.status(200).json({ response: responseMessage });
   } catch (err) {
     console.error("Chat Route Error:", err);
-    res.status(500).json({ error: "Something went wrong while processing the chat." });
+    res.status(500).json({ 
+      error: process.env.NODE_ENV === 'production' 
+        ? "Unable to process message" 
+        : err.message,
+      requestId: uuidv4()
+    });
   }
 });
 
-// End chat and return chat history
+// End chat endpoint
 app.post("/endchat", (req, res) => {
   try {
     const { chatId } = req.body;
@@ -143,29 +211,70 @@ app.post("/endchat", (req, res) => {
       return res.status(400).json({ message: "Invalid chatId or session has already ended." });
     }
 
-    // Retrieve chat history
     const chatHistory = session.history;
-
-    // Remove the session from active chats
     chatSessions.delete(chatId);
+
+    console.log(`Chat session ended: ${chatId}`);
 
     res.status(200).json({ 
       message: "Chat session ended successfully.",
-      history: chatHistory // Send history to client for local storage
+      history: chatHistory
     });
   } catch (err) {
     console.error("EndChat Error:", err);
-    res.status(500).json({ error: "Something went wrong while ending the chat session." });
+    res.status(500).json({ 
+      error: process.env.NODE_ENV === 'production' 
+        ? "Unable to end chat session" 
+        : err.message,
+      requestId: uuidv4()
+    });
   }
 });
 
-// Optional: Endpoint to get chat history (requires authentication in production)
-app.get("/chathistory", (req, res) => {
-  // Implement authentication and retrieval of chat histories if needed
-  res.status(501).json({ message: "Not Implemented." });
+// Global error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Error details:', {
+    timestamp: new Date().toISOString(),
+    error: err.message,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+    path: req.path,
+    method: req.method,
+    origin: req.headers.origin
+  });
+
+  res.status(err.status || 500).json({ 
+    error: process.env.NODE_ENV === 'production' 
+      ? 'Internal server error' 
+      : err.message,
+    requestId: uuidv4()
+  });
 });
 
+// Server startup
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+const server = app.listen(PORT, () => {
+  console.log(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
+  console.log('Allowed origins:', allowedOrigins);
+});
+
+// Graceful shutdown handling
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM. Performing graceful shutdown...');
+  chatSessions.clear();
+  server.close(() => {
+    console.log('Server closed. Process terminating...');
+    process.exit(0);
+  });
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  server.close(() => {
+    process.exit(1);
+  });
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit the process, but log the event
 });
