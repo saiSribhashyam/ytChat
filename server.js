@@ -47,8 +47,19 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
+const corsOptions = {
+  origin: 'https://ytchatfr.vercel.app', // Replace with your frontend domain
+  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+  credentials: true,
+  optionsSuccessStatus: 204
+};
+
+app.use(cors(corsOptions));
+
 // Pre-flight requests handling
-app.options('*', cors());
+app.options('*', cors(corsOptions));
+// Pre-flight requests handling
+//app.options('*', cors());
 
 // In-memory storage for chat sessions
 const chatSessions = new Map();
@@ -141,6 +152,7 @@ app.post("/startchat", async (req, res) => {
       trans: transcript 
     });
   } catch (err) {
+   // const x=await getYtinfo("https://www.youtube.com/watch?v=qD1U0D_MiH4")
     console.error("StartChat Error:", err);
     res.status(500).json({ 
       error: process.env.NODE_ENV === 'production' 

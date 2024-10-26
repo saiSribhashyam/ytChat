@@ -2,7 +2,8 @@ import ytdl from "ytdl-core";
 import fs from 'fs';
 
 const getYtinfo=async (url)=>{
-   try {let information=await ytdl.getInfo(url);
+   try {
+    let information=await ytdl.getInfo(url);
     const vidDetails=information.videoDetails;
     const author = vidDetails.author;
     const vidInfo={
@@ -19,7 +20,7 @@ const getYtinfo=async (url)=>{
 }
     catch(err){
         console.error(err);
-        return {error: "Something went wrong"};
+        return {error: "Something went wrong",err};
     }
 
 }
