@@ -47,19 +47,19 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-const corsOptions = {
-  origin: 'https://ytchatfr.vercel.app', // Replace with your frontend domain
-  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
-  credentials: true,
-  optionsSuccessStatus: 204
-};
+// const corsOptions = {
+//   origin: 'https://ytchatfr.vercel.app', // Replace with your frontend domain
+//   methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+//   credentials: true,
+//   optionsSuccessStatus: 204
+// };
 
-app.use(cors(corsOptions));
+// app.use(cors(corsOptions));
 
+// // Pre-flight requests handling
+// app.options('*', cors(corsOptions));
 // Pre-flight requests handling
-app.options('*', cors(corsOptions));
-// Pre-flight requests handling
-//app.options('*', cors());
+app.options('*', cors());
 
 // In-memory storage for chat sessions
 const chatSessions = new Map();
